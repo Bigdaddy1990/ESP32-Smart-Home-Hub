@@ -1,7 +1,7 @@
 esphome:
   name: smart-hub-esp32
   friendly_name: "ESP32 Smart Home Hub"
-  comment: "SML-Zähler, Pulse-Meter, BLE-Proxy, Web, Zeit"
+  comment: "SML-Zähler(EG), Pulse-Meter(DG), BLE-Proxy, BLE-Tracker, Web-, Zeitserver"
   name_add_mac_suffix: true
 
 esp32:
@@ -9,6 +9,12 @@ esp32:
   framework:
     type: esp-idf
   variant: esp32
+
+preferences:
+  # Schreibt restore_value-Globals (dg_richtung) maximal alle 60 s in den Flash.
+  # Ohne diese Einstellung → Flash-Schreibzugriff bei jedem Richtungswechsel.
+  # Bei 2× täglich (Sonnenauf/-untergang) unkritisch, aber gute Praxis.
+  flash_write_interval: 1min
 
 logger:
   level: DEBUG
@@ -353,7 +359,7 @@ sensor:
 
   # ───────────────────────────────────────────────────────
   # DG GERICHTETE LEISTUNGSSENSOREN
-  # Werden für Energieintegration (total_daily_energy) benötigt.
+  # Werden für die Integration (platform: integration) und die Live-Ansicht benötigt.
   # ───────────────────────────────────────────────────────
   - platform: template
     name: "DG Bezug Leistung"
@@ -409,34 +415,50 @@ sensor:
       return quote;
 
   # ───────────────────────────────────────────────────────
-  # DG TAGESENERGIE (getrennte Bezug/Einspeisung-Zähler)
-  # Wichtig: Beide Zähler zusammen = Gesamtimpulse, aber korrekt
-  # dem jeweiligen Vorzeichen zugeordnet — anders als der alte
-  # dachgeschoss_bezug der beide Richtungen aufsummierte.
+  # DG ENERGIE — KUMULATIV (Riemann-Integration in ESPHome)
   # ───────────────────────────────────────────────────────
-  - platform: total_daily_energy
-    name: "Dachgeschoss Bezug (Tag)"
-    id: dg_bezug_tag
-    power_id: dg_bezug_leistung
+  # platform: integration integriert Leistung (W) über Zeit (h) → Wh,
+  # multiply: 0.001 konvertiert zu kWh.
+  #
+  # restore: true (Standard) → Akkumulator wird in den Flash gesichert
+  # und überlebt Neustarts. flash_write_interval: 1min begrenzt dabei
+  # die Flash-Schreibrate — kein Datenverlust bei Reboot mehr.
+  #
+  # Verhalten analog zu den EG-SML-Zählern:
+  #   state_class: total_increasing, kein Tages-Reset, dauerhaft steigend
+  #   → direkt im HA-Energie-Dashboard verwendbar ohne HA-Helfer
+  #
+  # ⚠️  Beim ersten Flash nach einem Hard-Reset (Löschen des Flash-Speichers)
+  #     startet der Zähler bei 0. Dann einmalig den Zählerstand im
+  #     HA-Energie-Dashboard manuell kalibrieren.
+  # ───────────────────────────────────────────────────────
+  - platform: integration
+    name: "Dachgeschoss Gesamtbezug"
+    id: dg_gesamtbezug
+    sensor: dg_bezug_leistung
+    time_unit: h
     unit_of_measurement: "kWh"
     device_class: energy
     state_class: total_increasing
     accuracy_decimals: 4
     icon: "mdi:counter"
+    restore: true
     filters:
-      - multiply: 0.001
+      - multiply: 0.001       # Wh → kWh  (W × h = Wh, ÷ 1000 = kWh)
 
-  - platform: total_daily_energy
-    name: "Dachgeschoss Einspeisung (Tag)"
-    id: dg_einspeisung_tag
-    power_id: dg_einspeisung_leistung
+  - platform: integration
+    name: "Dachgeschoss Gesamteinspeisung"
+    id: dg_gesamteinspeisung
+    sensor: dg_einspeisung_leistung
+    time_unit: h
     unit_of_measurement: "kWh"
     device_class: energy
     state_class: total_increasing
     accuracy_decimals: 4
     icon: "mdi:counter"
+    restore: true
     filters:
-      - multiply: 0.001
+      - multiply: 0.001       # Wh → kWh
 
   # ═══════════════════════════════════════════════════════
   # EG SML (bidirektionaler Netzzähler)
@@ -498,6 +520,22 @@ sensor:
       float eg = id(erdgeschoss_leistung).state;
       if (isnan(eg)) return {};
       return eg;
+
+  # Bezug-Anteil (positiv) — für Energy-Dashboard-Live-Ansicht und Energiefluss-Karte.
+  # Die signierte "Netzlast EG" reicht dem Dashboard nicht für Richtungspfeile.
+  - platform: template
+    name: "Erdgeschoss Bezug Leistung"
+    id: eg_bezug_leistung
+    unit_of_measurement: "W"
+    device_class: power
+    state_class: measurement
+    accuracy_decimals: 1
+    update_interval: 5s
+    icon: "mdi:transmission-tower-import"
+    lambda: |-
+      float net = id(netzlast_eg).state;
+      if (isnan(net)) return {};
+      return (net > 0.0f) ? net : 0.0f;
 
   - platform: template
     name: "Erdgeschoss Einspeisung Leistung"
@@ -632,11 +670,11 @@ button:
             - "id(netzlast_dg).state"
             - "id(dg_richtung) == 1.0f ? \"Einspeisung\" : \"Bezug\""
       - logger.log:
-          format: "DG Verbrauch: %.1f W | Bezug (Tag): %.4f kWh | Einspeisung (Tag): %.4f kWh"
+          format: "DG Verbrauch: %.1f W | Gesamtbezug: %.4f kWh | Gesamteinspeisung: %.4f kWh"
           args:
             - "id(dg_verbrauch_brutto).state"
-            - "id(dg_bezug_tag).state"
-            - "id(dg_einspeisung_tag).state"
+            - "id(dg_gesamtbezug).state"
+            - "id(dg_gesamteinspeisung).state"
       - logger.log:
           format: "Solar Oben: %.1f W | Eigenverbrauch DG: %.1f %%"
           args:
