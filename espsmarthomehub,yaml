@@ -1,0 +1,659 @@
+esphome:
+  name: smart-hub-esp32
+  friendly_name: "ESP32 Smart Home Hub"
+  comment: "SML-Zähler, Pulse-Meter, BLE-Proxy, Web, Zeit"
+  name_add_mac_suffix: true
+
+esp32:
+  board: esp32dev
+  framework:
+    type: esp-idf
+  variant: esp32
+
+logger:
+  level: DEBUG
+  logs:
+    uart: INFO
+    sml: INFO
+    component: INFO
+    sensor: INFO
+    template.sensor: INFO
+    text_sensor: INFO
+    power: INFO
+    homeassistant.sensor: INFO
+    esp32_ble_tracker: INFO
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  manual_ip:
+    static_ip: 192.168.2.40
+    gateway: 192.168.2.1
+    subnet: 255.255.255.0
+    dns1: 192.168.2.1
+
+esp32_ble_tracker:
+  scan_parameters:
+    interval: 1100ms
+    window: 1100ms
+    active: false
+
+bluetooth_proxy:
+  active: false
+
+mdns:
+
+time:
+  - platform: sntp
+    id: sntp_time
+    timezone: Europe/Berlin
+    servers:
+      - 192.168.2.1
+      - pool.ntp.org
+
+api:
+  encryption:
+    key: !secret api_encryption_key
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+  - platform: web_server
+
+captive_portal:
+
+web_server:
+  port: 80
+
+uart:
+  - id: sml_uart
+    baud_rate: 9600
+    rx_pin: GPIO16
+    data_bits: 8
+    parity: NONE
+    stop_bits: 1
+
+sml:
+  - id: mysml
+    uart_id: sml_uart
+
+# ═══════════════════════════════════════════════════════
+# GLOBALE PARAMETER
+# Alle anlagenspezifischen Werte hier zentral anpassen.
+# ═══════════════════════════════════════════════════════
+globals:
+
+  # ── DG Richtungserkennung ──────────────────────────────
+  # Zweirichtungszähler: pulse = |V - S|, immer ≥ 0
+  # Richtung wird per Router-Grundlast-Heuristik mit Hysterese ermittelt:
+  #
+  #   est_v = S - P  (geschätzter Bruttoverbrauch unter Einspeisungsannahme)
+  #
+  #   Eintritt  Einspeisung: est_v ≥ (router_min + hysterese) = 15 W
+  #   Austritt  Einspeisung: est_v <  (router_min - hysterese) =  5 W
+  #   Grauzone  dazwischen : |est_v - router_min| < hysterese
+  #             → letzten bekannten Netzlastwert halten, keine Richtungsänderung
+
+  # Untere Grenze der Router-Grundlast (W).
+  # Konservativ: Router idle ~8–12 W → 10 W als sicherer Mindestwert.
+  # Niedriger = weniger Fehlklassifikation bei schwankender Router-Last.
+  - id: dg_router_min_w
+    type: float
+    restore_value: false
+    initial_value: "10.0"
+
+  # Hysterese-Puffer (W).
+  # Eintritt-Schwelle: 10 + 5 = 15 W
+  # Austritts-Schwelle: 10 - 5 =  5 W
+  # Grauzone:  5–15 W → keine Richtungsänderung, letzter Wert bleibt
+  - id: dg_hysterese
+    type: float
+    restore_value: false
+    initial_value: "5.0"
+
+  # Aktuell erkannte Richtung: 0.0 = Bezug, 1.0 = Einspeisung
+  # restore_value: true → überlebt Neustart sinnvoll für Dauerbetrieb
+  - id: dg_richtung
+    type: float
+    restore_value: true
+    initial_value: "0.0"
+
+  # ── Spike-Filter ──────────────────────────────────────
+  # Maximal zulässige Änderung der Netzlast pro 5s-Zyklus (W).
+  # Orientierung: Solar-Nennleistung 800 W + Puffer → 1000 W.
+  # Größere Sprünge werden geloggt und verworfen.
+  # FIX #3: war 2000 W → zu grob, lässt echte Messfehler durch
+  - id: dg_max_delta
+    type: float
+    restore_value: false
+    initial_value: "1000.0"
+
+  # Letzter gültiger Netzlastwert (für Spike-Filter und Grauzone)
+  - id: dg_netzlast_last
+    type: float
+    restore_value: false
+    initial_value: "NAN"
+
+  # ── Plausibilitätsgrenze ──────────────────────────────
+  # Maximale realistische DG-Last (W).
+  # Sicherungsautomat DG: z. B. 16 A × 230 V = 3.680 W → anpassen!
+  # FIX #4: Plausibilitätsprüfung jetzt im Lambda mit Logging statt
+  # stillem filter_out_of_range-Verwerfen ohne Diagnosemöglichkeit.
+  - id: dg_max_leistung
+    type: float
+    restore_value: false
+    initial_value: "3680.0"
+
+# ═══════════════════════════════════════════════════════
+# SENSOREN
+# ═══════════════════════════════════════════════════════
+sensor:
+
+  # ───────────────────────────────────────────────────────
+  # DG PULSE METER (intern)
+  # ───────────────────────────────────────────────────────
+  # Impulswertigkeit: 10.000 imp/kWh
+  #   Leistung : imp/min × 6     = W   (= 60 ÷ 10.000 × 1.000)
+  #
+  # internal_filter: 22ms
+  #   Schützt vor Prellen/EMV ohne Pulsverluste.
+  #   Bei 800 W: 800 ÷ 6 ≈ 133 imp/min → 1 imp / 450 ms → kein Verlust.
+  #   Bei 3.680 W: 3.680 ÷ 6 ≈ 613 imp/min → 1 imp / 98 ms → kein Verlust.
+  #
+  # timeout: 35s
+  #   Router-Mindestlast 10 W → 10 ÷ 6 = 1,67 imp/min → 1 imp / 36 s.
+  #   35 s liegt knapp unter dem maximalen Impulsabstand — minimales Risiko
+  #   eines Früh-Timeouts bei exakt 10 W, aber deutlich bessere Reaktionszeit
+  #   bei Lastwechseln (45 s fühlte sich träge an). Akzeptabler Kompromiss.
+  #
+  # Filter-Pipeline (Reihenfolge wichtig):
+  #   1. multiply: 6
+  #      imp/min → W  (10.000 imp/kWh)
+  #
+  #   2. throttle_average: 5s
+  #      Zeitbasierter Mittelwert über alle Pulse in 5 s.
+  #      Gibt nur einen Wert aus wenn ≥ 1 Sample vorhanden war.
+  #      Kann NaN liefern wenn im gesamten 5s-Fenster kein Sample kam
+  #      (z. B. direkt nach Boot oder bei sehr geringer Last).
+  #
+  #   3. filter_out: nan
+  #      Muss NACH throttle_average stehen — das ist entscheidend.
+  #      throttle_average erzeugt NaN intern (kein Sample im Fenster).
+  #      filter_out VOR throttle_average würde dieses NaN nie sehen.
+  #      Reihenfolge: throttle_average produziert → filter_out verwirft.
+  #
+  #   4. heartbeat: 5s
+  #      Erzwingt Update alle 5 s auch wenn throttle_average+filter_out
+  #      keinen Wert durchgelassen haben. Verhindert "stehenbleiben"
+  #      bei sehr geringer Last (z. B. 10 W, Puls alle ~36 s).
+  # ───────────────────────────────────────────────────────
+  - platform: pulse_meter
+    pin:
+      number: GPIO18
+      mode: INPUT_PULLUP
+    id: dg_puls_roh
+    internal: true
+    internal_filter: 22ms
+    timeout: 35s
+    filters:
+      - multiply: 6
+      - throttle_average: 5s
+      - filter_out: nan
+      - heartbeat: 5s
+
+  # ───────────────────────────────────────────────────────
+  # SOLAR INPUTS (aus Home Assistant)
+  # ───────────────────────────────────────────────────────
+  # Clamp auf 0–Nennleistung direkt am Eingang.
+  # Negative Nachts-Offsets würden sonst die Richtungsheuristik stören.
+  - platform: homeassistant
+    entity_id: sensor.solar_oben_solar_oben_leistung
+    id: sensor_solar_oben_power
+    internal: true
+    filters:
+      - clamp:
+          min_value: 0.0
+          max_value: 800.0          # Nennleistung Solar Oben (W) — anpassen!
+
+  - platform: homeassistant
+    entity_id: sensor.solar_unten_solar_unten_leistung
+    id: sensor_solar_unten_power
+    internal: true
+    filters:
+      - clamp:
+          min_value: 0.0
+          max_value: 800.0          # Nennleistung Solar Unten (W) — anpassen!
+
+  # ───────────────────────────────────────────────────────
+  # NETZLAST DG (signiert)
+  # ───────────────────────────────────────────────────────
+  # Vollständige Richtungslogik mit:
+  #   1) Plausibilitätsprüfung mit Logging (FIX #4, ersetzt filter_out_of_range)
+  #   2) Grauzonenbehandlung (FIX #2)
+  #   3) Hysterese-Richtungserkennung
+  #   4) Spike-Filter (FIX #3: max_delta 1000 W statt 2000 W)
+  # ───────────────────────────────────────────────────────
+  - platform: template
+    name: "Netzlast DG"
+    id: netzlast_dg
+    unit_of_measurement: "W"
+    device_class: power
+    state_class: measurement
+    accuracy_decimals: 1
+    update_interval: 5s
+    icon: "mdi:transmission-tower"
+    lambda: |-
+      float pulse    = id(dg_puls_roh).state;
+      float solar    = id(sensor_solar_oben_power).state;
+      float min_v    = id(dg_router_min_w);
+      float hyst     = id(dg_hysterese);
+      float richtung = id(dg_richtung);
+      float last     = id(dg_netzlast_last);
+
+      // Kein Pulse-Messwert → keine Aussage
+      if (isnan(pulse)) return {};
+      // Solar unbekannt → konservativ 0 annehmen (→ immer Bezug)
+      if (isnan(solar)) solar = 0.0f;
+
+      // ── Fehlpuls-Guard ─────────────────────────────────────────
+      // Pulse < 3 W entspricht < 1 Impuls alle 120 s — weit unter der
+      // physikalisch möglichen Router-Grundlast (10 W / 1 imp/36 s).
+      // Grenze 3 W statt 5 W: schützt echte niedrige Lasten (6–8 W)
+      // vor fälschlichem Verwerfen, filtert aber noch sichere Fehlpulse.
+      if (pulse < 3.0f && pulse > 0.0f) {
+        ESP_LOGD("dg_bilanz", "Fehlpuls-Guard: %.1f W < 3 W → verworfen", pulse);
+        return isnan(last) ? optional<float>{} : last;
+      }
+
+      // ── FIX #4: Plausibilitätsprüfung mit Logging ──────────────
+      // Ersetzt filter_out_of_range: Werte werden nicht still verworfen,
+      // sondern geloggt und im letzten gültigen Wert gehalten.
+      float max_p = id(dg_max_leistung) * 1.1f;   // 10% Messtoleranpuffer
+      if (pulse > max_p) {
+        ESP_LOGW("dg_bilanz",
+          "Puls außerhalb Plausibilitätsgrenze: %.1f W > %.1f W → verworfen",
+          pulse, max_p);
+        return isnan(last) ? optional<float>{} : last;
+      }
+
+      // Geschätzter Bruttoverbrauch unter Einspeisungsannahme
+      float est_v = solar - pulse;
+
+      // ── FIX #2: Grauzone abfangen ───────────────────────────────
+      // Wenn est_v innerhalb der Hysterese-Bandbreite um router_min liegt,
+      // ist keine sichere Richtungsaussage möglich.
+      // → Letzten gültigen Wert halten, keine Richtungsänderung.
+      if (fabsf(est_v - min_v) < hyst) {
+        ESP_LOGD("dg_bilanz",
+          "Grauzone: est_V=%.1f W in [%.1f, %.1f] W → Wert gehalten",
+          est_v, min_v - hyst, min_v + hyst);
+        return isnan(last) ? optional<float>{} : last;
+      }
+
+      // ── Hysterese-Richtungserkennung ────────────────────────────
+      if (richtung == 0.0f) {
+        // Aktuell Bezug → Wechsel zu Einspeisung wenn est_v klar darüber
+        if (est_v >= (min_v + hyst)) {
+          id(dg_richtung) = 1.0f;
+          ESP_LOGI("dg_bilanz",
+            "Richtung: Bezug → Einspeisung (est_V=%.1fW, S=%.1fW, P=%.1fW)",
+            est_v, solar, pulse);
+          richtung = 1.0f;
+        }
+      } else {
+        // Aktuell Einspeisung → Wechsel zu Bezug wenn est_v klar darunter
+        if (est_v < (min_v - hyst)) {
+          id(dg_richtung) = 0.0f;
+          ESP_LOGI("dg_bilanz",
+            "Richtung: Einspeisung → Bezug (est_V=%.1fW, S=%.1fW, P=%.1fW)",
+            est_v, solar, pulse);
+          richtung = 0.0f;
+        }
+      }
+
+      // Nettoleistung mit Vorzeichen
+      float net = (richtung == 1.0f) ? -pulse : pulse;
+
+      // ── FIX #3: Spike-Filter (1000 W statt 2000 W) ─────────────
+      if (!isnan(last) && fabsf(net - last) > id(dg_max_delta)) {
+        ESP_LOGW("dg_bilanz",
+          "Spike: Δ=%.1fW > %.1fW (net=%.1fW, last=%.1fW) → verworfen",
+          fabsf(net - last), id(dg_max_delta), net, last);
+        return last;
+      }
+
+      id(dg_netzlast_last) = net;
+      return net;
+
+  # ───────────────────────────────────────────────────────
+  # DG BRUTTOVERBRAUCH
+  # Tatsächlicher Gesamtverbrauch im DG (inkl. Solar-Eigenverbrauch).
+  # V = Solar + Netzlast  (Bezug: S+P, Einspeisung: S-P)
+  # Physikalisch immer ≥ 0, Clamp schützt vor negativen Rechenwerten.
+  # ───────────────────────────────────────────────────────
+  - platform: template
+    name: "DG Verbrauch"
+    id: dg_verbrauch_brutto
+    unit_of_measurement: "W"
+    device_class: power
+    state_class: measurement
+    accuracy_decimals: 1
+    update_interval: 5s
+    icon: "mdi:home-lightning-bolt"
+    lambda: |-
+      float net   = id(netzlast_dg).state;
+      float solar = id(sensor_solar_oben_power).state;
+
+      if (isnan(net)) return {};
+      if (isnan(solar)) solar = 0.0f;
+
+      float v = solar + net;
+      if (v < 0.0f) v = 0.0f;
+      return v;
+
+  # ───────────────────────────────────────────────────────
+  # DG GERICHTETE LEISTUNGSSENSOREN
+  # Werden für Energieintegration (total_daily_energy) benötigt.
+  # ───────────────────────────────────────────────────────
+  - platform: template
+    name: "DG Bezug Leistung"
+    id: dg_bezug_leistung
+    unit_of_measurement: "W"
+    device_class: power
+    state_class: measurement
+    accuracy_decimals: 1
+    update_interval: 5s
+    icon: "mdi:transmission-tower-import"
+    lambda: |-
+      float net = id(netzlast_dg).state;
+      if (isnan(net)) return {};
+      return (net > 0.0f) ? net : 0.0f;
+
+  - platform: template
+    name: "DG Einspeisung Leistung"
+    id: dg_einspeisung_leistung
+    unit_of_measurement: "W"
+    device_class: power
+    state_class: measurement
+    accuracy_decimals: 1
+    update_interval: 5s
+    icon: "mdi:transmission-tower-export"
+    lambda: |-
+      float net = id(netzlast_dg).state;
+      if (isnan(net)) return {};
+      return (net < 0.0f) ? -net : 0.0f;
+
+  # ───────────────────────────────────────────────────────
+  # DG SOLAR-EIGENVERBRAUCH
+  # Eigenverbrauch = Solar − Einspeisung
+  # Solar wurde bereits am Eingang auf ≥ 0 geclamped.
+  # ───────────────────────────────────────────────────────
+  - platform: template
+    name: "Solar-Eigenverbrauch DG"
+    id: solar_autarkie_dg
+    unit_of_measurement: "%"
+    accuracy_decimals: 1
+    update_interval: 30s
+    icon: "mdi:solar-power"
+    lambda: |-
+      float solar       = id(sensor_solar_oben_power).state;
+      float einspeisung = id(dg_einspeisung_leistung).state;
+
+      if (isnan(solar) || solar == 0.0f) return {};
+      if (isnan(einspeisung)) einspeisung = 0.0f;
+
+      float eigenverbrauch = solar - einspeisung;
+      float quote = (eigenverbrauch / solar) * 100.0f;
+      if (quote > 100.0f) quote = 100.0f;
+      if (quote <   0.0f) quote =   0.0f;
+      return quote;
+
+  # ───────────────────────────────────────────────────────
+  # DG TAGESENERGIE (getrennte Bezug/Einspeisung-Zähler)
+  # Wichtig: Beide Zähler zusammen = Gesamtimpulse, aber korrekt
+  # dem jeweiligen Vorzeichen zugeordnet — anders als der alte
+  # dachgeschoss_bezug der beide Richtungen aufsummierte.
+  # ───────────────────────────────────────────────────────
+  - platform: total_daily_energy
+    name: "Dachgeschoss Bezug (Tag)"
+    id: dg_bezug_tag
+    power_id: dg_bezug_leistung
+    unit_of_measurement: "kWh"
+    device_class: energy
+    state_class: total_increasing
+    accuracy_decimals: 4
+    icon: "mdi:counter"
+    filters:
+      - multiply: 0.001
+
+  - platform: total_daily_energy
+    name: "Dachgeschoss Einspeisung (Tag)"
+    id: dg_einspeisung_tag
+    power_id: dg_einspeisung_leistung
+    unit_of_measurement: "kWh"
+    device_class: energy
+    state_class: total_increasing
+    accuracy_decimals: 4
+    icon: "mdi:counter"
+    filters:
+      - multiply: 0.001
+
+  # ═══════════════════════════════════════════════════════
+  # EG SML (bidirektionaler Netzzähler)
+  # OBIS 1-0:16.7.0 = vorzeichenbehafteter Netto-Netzwert (Solar enthalten):
+  #   positiv = Netzbezug, negativ = Netzeinspeisung
+  # ═══════════════════════════════════════════════════════
+  - platform: sml
+    sml_id: mysml
+    name: "Erdgeschoss Gesamtbezug"
+    id: erdgeschoss_bezug
+    obis_code: "1-0:1.8.0"
+    unit_of_measurement: "kWh"
+    accuracy_decimals: 4
+    device_class: energy
+    state_class: total_increasing
+    icon: "mdi:counter"
+    filters:
+      - multiply: 0.0001
+
+  - platform: sml
+    sml_id: mysml
+    name: "Erdgeschoss Gesamteinspeisung"
+    id: erdgeschoss_einspeisung_kwh
+    obis_code: "1-0:2.8.0"
+    unit_of_measurement: "kWh"
+    accuracy_decimals: 4
+    device_class: energy
+    state_class: total_increasing
+    icon: "mdi:counter"
+    filters:
+      - multiply: 0.0001
+
+  - platform: sml
+    sml_id: mysml
+    name: "Erdgeschoss Momentanleistung"
+    id: erdgeschoss_leistung
+    obis_code: "1-0:16.7.0"
+    unit_of_measurement: "W"
+    accuracy_decimals: 1
+    device_class: power
+    state_class: measurement
+    icon: "mdi:flash"
+
+  # ───────────────────────────────────────────────────────
+  # EG BILANZ
+  # erdgeschoss_leistung (SML 1-0:16.7.0) ist bereits der Netto-Netzwert.
+  # Solar ist eingeschlossen — nie nochmals subtrahieren!
+  # ───────────────────────────────────────────────────────
+  - platform: template
+    name: "Netzlast EG"
+    id: netzlast_eg
+    unit_of_measurement: "W"
+    device_class: power
+    state_class: measurement
+    accuracy_decimals: 1
+    update_interval: 5s
+    icon: "mdi:transmission-tower"
+    lambda: |-
+      float eg = id(erdgeschoss_leistung).state;
+      if (isnan(eg)) return {};
+      return eg;
+
+  - platform: template
+    name: "Erdgeschoss Einspeisung Leistung"
+    id: eg_einspeisung_leistung
+    unit_of_measurement: "W"
+    device_class: power
+    state_class: measurement
+    accuracy_decimals: 1
+    update_interval: 5s
+    icon: "mdi:transmission-tower-export"
+    lambda: |-
+      float net = id(netzlast_eg).state;
+      if (isnan(net)) return {};
+      return (net < 0.0f) ? -net : 0.0f;
+
+  - platform: template
+    name: "Solar-Eigenverbrauch EG"
+    id: solar_autarkie_eg
+    unit_of_measurement: "%"
+    accuracy_decimals: 1
+    update_interval: 30s
+    icon: "mdi:solar-power"
+    lambda: |-
+      float solar       = id(sensor_solar_unten_power).state;
+      float einspeisung = id(eg_einspeisung_leistung).state;
+
+      if (isnan(solar) || solar == 0.0f) return {};
+      if (isnan(einspeisung)) einspeisung = 0.0f;
+
+      float eigenverbrauch = solar - einspeisung;
+      float quote = (eigenverbrauch / solar) * 100.0f;
+      if (quote > 100.0f) quote = 100.0f;
+      if (quote <   0.0f) quote =   0.0f;
+      return quote;
+
+  - platform: uptime
+    name: "ESP32 Uptime"
+    id: esp32_uptime
+    update_interval: 60s
+
+# ═══════════════════════════════════════════════════════
+# TEXT SENSOREN
+# ═══════════════════════════════════════════════════════
+text_sensor:
+  - platform: sml
+    sml_id: mysml
+    name: "Erdgeschoss Meter Type"
+    id: erdgeschoss_typ
+    obis_code: "1-0:96.50.1"
+    format: text
+    icon: "mdi:identifier"
+
+  - platform: sml
+    sml_id: mysml
+    name: "Erdgeschoss Device ID"
+    id: erdgeschoss_geraete_id
+    obis_code: "1-0:96.1.0"
+    format: hex
+    icon: "mdi:identifier"
+
+  - platform: wifi_info
+    ip_address:
+      name: "ESP32 IP Adresse"
+      id: esp32_ip
+    ssid:
+      name: "ESP32 SSID"
+      id: esp32_ssid
+    mac_address:
+      name: "ESP32 MAC Adresse"
+      id: esp32_mac
+
+  - platform: template
+    name: "Bluetooth Status"
+    id: bt_status
+    icon: "mdi:bluetooth"
+    update_interval: 60s
+    lambda: |-
+      return std::string("Passiv (konfiguriert)");
+
+  # Zeigt aktuelle Richtungserkennung — zur Verifikation der Heuristik im Betrieb
+  - platform: template
+    name: "DG Zähler-Richtung"
+    id: dg_richtung_status
+    icon: "mdi:swap-horizontal"
+    update_interval: 10s
+    lambda: |-
+      float pulse = id(dg_puls_roh).state;
+      float solar = id(sensor_solar_oben_power).state;
+      float net   = id(netzlast_dg).state;
+      float min_v = id(dg_router_min_w);
+      float hyst  = id(dg_hysterese);
+
+      if (isnan(net)) return std::string("Unbekannt (kein Messwert)");
+
+      float est_v = (isnan(solar) ? 0.0f : solar) - (isnan(pulse) ? 0.0f : pulse);
+      bool grauzone = (fabsf(est_v - min_v) < hyst);
+
+      char buf[80];
+      if (grauzone) {
+        snprintf(buf, sizeof(buf),
+          "Grauzone (est_V=%.0fW in [%.0f–%.0f]W)",
+          est_v, min_v - hyst, min_v + hyst);
+      } else if (id(dg_richtung) == 1.0f) {
+        snprintf(buf, sizeof(buf),
+          "Einspeisung (%.0fW → Netz, est_V=%.0fW)", isnan(pulse) ? 0.0f : pulse, est_v);
+      } else {
+        snprintf(buf, sizeof(buf),
+          "Bezug (%.0fW ← Netz, est_V=%.0fW)", isnan(pulse) ? 0.0f : pulse, est_v);
+      }
+      return std::string(buf);
+
+# ═══════════════════════════════════════════════════════
+# BUTTONS
+# ═══════════════════════════════════════════════════════
+button:
+  - platform: template
+    name: "SML Diagnose"
+    id: sml_diagnose
+    icon: "mdi:stethoscope"
+    on_press:
+      - logger.log: "=== SML / DG DIAGNOSE START ==="
+      - logger.log:
+          format: "EG: %.1f W | Bezug: %.4f kWh | Einspeisung: %.4f kWh"
+          args:
+            - "id(erdgeschoss_leistung).state"
+            - "id(erdgeschoss_bezug).state"
+            - "id(erdgeschoss_einspeisung_kwh).state"
+      - logger.log:
+          format: "DG Puls (roh): %.1f W | Netzlast: %.1f W | Richtung: %s"
+          args:
+            - "id(dg_puls_roh).state"
+            - "id(netzlast_dg).state"
+            - "id(dg_richtung) == 1.0f ? \"Einspeisung\" : \"Bezug\""
+      - logger.log:
+          format: "DG Verbrauch: %.1f W | Bezug (Tag): %.4f kWh | Einspeisung (Tag): %.4f kWh"
+          args:
+            - "id(dg_verbrauch_brutto).state"
+            - "id(dg_bezug_tag).state"
+            - "id(dg_einspeisung_tag).state"
+      - logger.log:
+          format: "Solar Oben: %.1f W | Eigenverbrauch DG: %.1f %%"
+          args:
+            - "id(sensor_solar_oben_power).state"
+            - "id(solar_autarkie_dg).state"
+      - logger.log:
+          format: "Grenzwerte: Router-Min=%.0fW | Hysterese=%.0fW | Max-Delta=%.0fW | Max-Last=%.0fW"
+          args:
+            - "id(dg_router_min_w)"
+            - "id(dg_hysterese)"
+            - "id(dg_max_delta)"
+            - "id(dg_max_leistung)"
+      - logger.log: "=== SML / DG DIAGNOSE ENDE ==="
+
+  - platform: template
+    name: "BT Scan starten"
+    id: bt_scan_button
+    icon: "mdi:bluetooth-audio"
+    on_press:
+      - logger.log: "BT: Passiver Scan läuft kontinuierlich — kein manueller Start erforderlich"
