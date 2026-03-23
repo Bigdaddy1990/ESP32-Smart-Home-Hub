@@ -11,9 +11,10 @@ esp32:
   variant: esp32
 
 preferences:
-  # Schreibt restore_value-Globals (dg_richtung) maximal alle 60 s in den Flash.
-  # Ohne diese Einstellung → Flash-Schreibzugriff bei jedem Richtungswechsel.
-  # Bei 2× täglich (Sonnenauf/-untergang) unkritisch, aber gute Praxis.
+  # Schreibt persistente Werte (restore: true) maximal alle 60 s in den Flash.
+  # Betrifft: solar_oben_energie, solar_unten_energie
+  # Ohne diese Einstellung → Flash-Schreibzugriff bei jedem Integration-Update
+  # (sekündlich) → tausende Schreibvorgänge pro Tag → Flash-Verschleiß.
   flash_write_interval: 1min
 
 logger:
@@ -207,20 +208,19 @@ sensor:
       - filter_out: nan
       - heartbeat: 5s
 
-  # ───────────────────────────────────────────────────────
-  # SOLAR INPUTS (aus Home Assistant)
-  # ───────────────────────────────────────────────────────
-  # Clamp auf 0–Nennleistung direkt am Eingang.
-  # Negative Nachts-Offsets würden sonst die Richtungsheuristik stören.
+   
+  # ═══════════════════════════════════════════════════════
+  # SOLAR (aus Home Assistant)
+  # ═══════════════════════════════════════════════════════
   - platform: homeassistant
-    entity_id: sensor.solar_oben_solar_oben_leistung
+    entity_id: sensor.solar_oben_leistung_in_w
     id: sensor_solar_oben_power
     internal: true
     filters:
       - clamp:
           min_value: 0.0
           max_value: 800.0          # Nennleistung Solar Oben (W) — anpassen!
-
+ 
   - platform: homeassistant
     entity_id: sensor.solar_unten_solar_unten_leistung
     id: sensor_solar_unten_power
@@ -229,6 +229,59 @@ sensor:
       - clamp:
           min_value: 0.0
           max_value: 800.0          # Nennleistung Solar Unten (W) — anpassen!
+ 
+  - platform: template
+    name: "Solar Gesamt Leistung"
+    id: solar_gesamt_leistung
+    unit_of_measurement: "W"
+    device_class: power
+    state_class: measurement
+    accuracy_decimals: 1
+    update_interval: 10s
+    icon: "mdi:solar-power"
+    lambda: |-
+      float oben  = id(sensor_solar_oben_power).state;
+      float unten = id(sensor_solar_unten_power).state;
+      if (isnan(oben))  oben  = 0.0f;
+      if (isnan(unten)) unten = 0.0f;
+      return oben + unten;
+ 
+  # ── Solar Energie (einzeln, für HA-Energie-Dashboard) ──────────────────
+  # FIX: solar_gesamt_energie als Template mit state_class: total_increasing
+  # entfernt. Grund: Das Template feuert beim Boot bevor die restore-Werte
+  # aus dem Flash geladen sind → liefert 0 kWh → HA bucht die gesamte
+  # bisherige Solar-Energie fälschlich als "nicht erfassten Verbrauch".
+  # Lösung: Beide Quellen einzeln im HA-Energie-Dashboard eintragen.
+  # Das Dashboard summiert sie in der Ansicht automatisch.
+
+  - platform: integration
+    name: "Solar Oben Energie"
+    id: solar_oben_energie
+    sensor: sensor_solar_oben_power
+    time_unit: h
+    restore: true
+    unit_of_measurement: "kWh"
+    device_class: energy
+    state_class: total_increasing
+    accuracy_decimals: 4
+    icon: "mdi:counter"
+    filters:
+      - multiply: 0.001             # Wh → kWh
+ 
+  - platform: integration
+    name: "Solar Unten Energie"
+    id: solar_unten_energie
+    sensor: sensor_solar_unten_power
+    time_unit: h
+    restore: true
+    unit_of_measurement: "kWh"
+    device_class: energy
+    state_class: total_increasing
+    accuracy_decimals: 4
+    icon: "mdi:counter"
+    filters:
+      - multiply: 0.001             # Wh → kWh
+ 
 
   # ───────────────────────────────────────────────────────
   # NETZLAST DG (signiert)
@@ -596,17 +649,20 @@ text_sensor:
     format: hex
     icon: "mdi:identifier"
 
-  - platform: wifi_info
+ - platform: wifi_info
     ip_address:
       name: "ESP32 IP Adresse"
       id: esp32_ip
+      icon: "mdi:ip-network"
     ssid:
-      name: "ESP32 SSID"
+      name: "ESP32 WLAN"
       id: esp32_ssid
+      icon: "mdi:wifi"
     mac_address:
       name: "ESP32 MAC Adresse"
       id: esp32_mac
-
+      icon: "mdi:identifier"
+ 
   - platform: template
     name: "Bluetooth Status"
     id: bt_status
@@ -647,6 +703,7 @@ text_sensor:
       }
       return std::string(buf);
 
+ 
 # ═══════════════════════════════════════════════════════
 # BUTTONS
 # ═══════════════════════════════════════════════════════
@@ -656,7 +713,7 @@ button:
     id: sml_diagnose
     icon: "mdi:stethoscope"
     on_press:
-      - logger.log: "=== SML / DG DIAGNOSE START ==="
+      - logger.log: "=== SML DIAGNOSE START ==="
       - logger.log:
           format: "EG: %.1f W | Bezug: %.4f kWh | Einspeisung: %.4f kWh"
           args:
@@ -664,34 +721,36 @@ button:
             - "id(erdgeschoss_bezug).state"
             - "id(erdgeschoss_einspeisung_kwh).state"
       - logger.log:
-          format: "DG Puls (roh): %.1f W | Netzlast: %.1f W | Richtung: %s"
+          format: "DG: %.1f W | Bezug: %.4f kWh | Einspeisung: %.4f kWh"
           args:
-            - "id(dg_puls_roh).state"
             - "id(netzlast_dg).state"
-            - "id(dg_richtung) == 1.0f ? \"Einspeisung\" : \"Bezug\""
-      - logger.log:
-          format: "DG Verbrauch: %.1f W | Gesamtbezug: %.4f kWh | Gesamteinspeisung: %.4f kWh"
-          args:
-            - "id(dg_verbrauch_brutto).state"
             - "id(dg_gesamtbezug).state"
             - "id(dg_gesamteinspeisung).state"
       - logger.log:
-          format: "Solar Oben: %.1f W | Eigenverbrauch DG: %.1f %%"
+          format: "DG Bezug: %.1f W | DG Einspeisung: %.1f W | DG Verbrauch: %.1f W"
+          args:
+            - "id(dg_bezug_leistung).state"
+            - "id(dg_einspeisung_leistung).state"
+            - "id(dg_verbrauch_brutto).state"
+      - logger.log:
+          format: "Solar Oben: %.1f W (%.4f kWh) | Solar Unten: %.1f W (%.4f kWh) | Gesamt: %.1f W"
           args:
             - "id(sensor_solar_oben_power).state"
-            - "id(solar_autarkie_dg).state"
-      - logger.log:
-          format: "Grenzwerte: Router-Min=%.0fW | Hysterese=%.0fW | Max-Delta=%.0fW | Max-Last=%.0fW"
-          args:
-            - "id(dg_router_min_w)"
-            - "id(dg_hysterese)"
-            - "id(dg_max_delta)"
-            - "id(dg_max_leistung)"
-      - logger.log: "=== SML / DG DIAGNOSE ENDE ==="
-
+            - "id(solar_oben_energie).state"
+            - "id(sensor_solar_unten_power).state"
+            - "id(solar_unten_energie).state"
+            - "id(solar_gesamt_leistung).state"
+      - logger.log: "=== SML DIAGNOSE ENDE ==="
+ 
+  # FIX: Korrekte ESPHome-Action statt direktem C++-Pointer-Aufruf.
+  # esp32_ble_tracker.start_scan löst einen einmaligen Scan-Zyklus aus.
+  # continuous: false → Scan endet nach einem Durchlauf (passiver Modus
+  # läuft danach gemäß scan_parameters weiter).
   - platform: template
     name: "BT Scan starten"
     id: bt_scan_button
     icon: "mdi:bluetooth-audio"
     on_press:
-      - logger.log: "BT: Passiver Scan läuft kontinuierlich — kein manueller Start erforderlich"
+      - logger.log: "Manueller Bluetooth-Scan gestartet"
+      - esp32_ble_tracker.start_scan:
+          continuous: false
