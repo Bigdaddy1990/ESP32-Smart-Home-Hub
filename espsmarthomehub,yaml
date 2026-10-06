@@ -649,7 +649,7 @@ text_sensor:
     format: hex
     icon: "mdi:identifier"
 
- - platform: wifi_info
+  - platform: wifi_info
     ip_address:
       name: "ESP32 IP Adresse"
       id: esp32_ip
