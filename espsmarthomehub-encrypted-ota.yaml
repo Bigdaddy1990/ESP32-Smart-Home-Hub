@@ -1,0 +1,13 @@
+# Use only after the hub has successfully booted ESPHome 2026.9.1 or newer.
+packages:
+  hub: !include espsmarthomehub,yaml
+
+esphome:
+  min_version: 2026.9.1
+
+# Replace the password bridge with encrypted OTA using the API encryption key.
+ota:
+  - id: !extend hub_ota
+    password: !remove
+    encryption:
+  - id: !remove hub_web_ota

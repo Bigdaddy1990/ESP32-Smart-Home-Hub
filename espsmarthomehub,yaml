@@ -64,8 +64,10 @@ api:
 
 ota:
   - platform: esphome
+    id: hub_ota
     password: !secret ota_password
   - platform: web_server
+    id: hub_web_ota
 
 captive_portal:
 
