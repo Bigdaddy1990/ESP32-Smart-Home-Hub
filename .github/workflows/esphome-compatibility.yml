@@ -45,5 +45,27 @@ jobs:
           CONFIGURATION: ${{ matrix.configuration }}
         run: |
           cd "$RUNNER_TEMP/hub-build"
-          esphome config "$CONFIGURATION"
+          esphome config "$CONFIGURATION" > resolved.yaml
+          cat resolved.yaml
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          import yaml
+
+          # BaseLoader retains secret references as scalar values without
+          # resolving them or requiring a constructor for ESPHome YAML tags.
+          config = yaml.load(Path("resolved.yaml").read_text(), Loader=yaml.BaseLoader)
+          platforms = {entry["platform"] for entry in config["ota"]}
+          native = next(entry for entry in config["ota"] if entry["platform"] == "esphome")
+          if os.environ["CONFIGURATION"] == "espsmarthomehub-encrypted-ota.yaml":
+              assert platforms == {"esphome"}, "Plaintext OTA platform restored"
+              assert "captive_portal" not in config, "Captive portal restores Web OTA"
+              assert config["web_server"]["ota"] == "false", "HTTP updates must be disabled"
+              assert "password" not in native, "Encrypted stage retains OTA password"
+              assert native["encryption"]["key"] == config["api"]["encryption"]["key"]
+          else:
+              assert platforms == {"esphome", "web_server"}, "Password bridge changed"
+              assert native.get("password"), "Password bridge authentication missing"
+          print("OTA stage isolation verified")
+          PY
           esphome compile "$CONFIGURATION"

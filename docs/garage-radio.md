@@ -159,9 +159,9 @@ entsprechend `espsmarthomehub-encrypted-ota.yaml`. Reale Secrets bleiben lokal.
 Das Captive Portal ist ohne Fallback-AP bereits im Ausgangsstand unerreichbar;
 es ist kein nachgewiesener Recovery-Weg. Nur im verschlüsselten Einstieg wird es
 entfernt, damit seine Auto-Load-Abhängigkeit HTTP-OTA nicht erneut aktiviert.
-Die Web-Statusoberfläche bleibt dort erhalten, mit explizitem \`ota: false\`.
-Im aufgelösten verschlüsselten Build darf kein \`platform: web_server\` unter
-\`ota\` und kein \`captive_portal\` mehr enthalten sein; der \`hub_ota\`-Eintrag
+Die Web-Statusoberfläche bleibt dort erhalten, mit explizitem `ota: false`.
+Im aufgelösten verschlüsselten Build darf kein `platform: web_server` unter
+`ota` und kein `captive_portal` mehr enthalten sein; der `hub_ota`-Eintrag
 muss weiterhin Verschlüsselung mit dem unveränderten API-Key verwenden.
 
 Die OTA-Migrationsanleitung bleibt gültig: Passwortbrücke zuerst, verschlüsselter
