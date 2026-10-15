@@ -59,7 +59,7 @@ nicht abgerufen. Alle nachfolgenden Hardwarewirkungen sind **unbestätigt**.
 | Shelly Plus 1 .72, Garage 2 | Wiederholte WLAN-Abbrüche vom Nutzer berichtet; 09.10. -85 dBm, drei laufende Scripts dokumentiert | Eigentlichen WLAN-Pfad verbessern; Torimpuls/Auto-off/Taster lokal erhalten |
 | Zwei Tuya-Kontakte | Netzplan identifiziert Verpackungen C30-ZY_D02_1PCS als WiFi Version; physische HA-ID-Zuordnung nicht bestätigt | Kontakt A Garage 1, B Garage 2 als Ziel; einzeln zuordnen, WLAN/App/HA-Ereignisweg testen |
 | Vorhandene Gen2/Gen3-Shellys | Mehrere native Extender-Kandidaten; blauer Mini ggf. bereits LichtWZ | Kein bereits belegtes Gerät als freie Reserve umwidmen; nur passendes freies/versorgtes Gerät verwenden |
-| Repeater 6000 | Wohnzimmer EG dokumentiert; damaliger Diagnoseabruf HTTP 500, Uplinkmodus ungeklärt | Heutigen AP/BSSID-/Uplinkpfad feststellen; HTTP 500 beweist keinen Funk-/Hardwaredefekt |
+| Repeater 6000 | Nutzerbestätigung vom 15.10.: Auch am Fenster getestet, ohne besseren WLAN-Empfang zur Garage. Damaliger Diagnoseabruf HTTP 500; Uplinkmodus ungeklärt | Fensterversuch als erfolglos abgeschlossen übernehmen; nicht erneut als Lösung planen. HTTP 500 beweist keinen Funk-/Hardwaredefekt |
 
 Die aktuelle Repository-YAML hat DG-Impulszählung, während ältere Nutzerentscheidungen
 auch einen späteren DG-SML-Zähler nennen. Repository, installierte Firmware und
@@ -85,12 +85,23 @@ besseren Ort; Geräte-/Anwendungserfolg und nicht nur ESP-RSSI vergleichen.
 
 ## Konkreter WLAN-Pilot Richtung Garage
 
-**Vorrang hat ein brauchbarer 2,4-GHz-AP-Pfad vom EG-Fenster Richtung Garagen.**
-Zuerst den bestehenden Repeater-Uplink und die Zuordnung der drei Zielclients
-prüfen. Falls mit Positionierung des bestehenden Repeaters beide Garagen erreicht
-werden und die übrigen Clients stabil bleiben, ist kein ESP-Router nötig.
-Ein LAN-angebundenes AP-Gerät an diesem Ort vermeidet einen zusätzlichen
-drahtlosen Uplink; ein verfügbarer Kabelweg ist noch nicht belegt.
+**Der Fensterversuch mit dem vorhandenen Repeater ist bereits erfolglos getestet.**
+Quelle: direkte Nutzerkorrektur vom 15.10.2026. Auch am Fenster verbessert sich der
+WLAN-Empfang zur Garage nicht. Dieser Versuch wird nicht erneut eingeplant.
+Konkrete RSSI-, Verlust- oder Latenzwerte wurden dabei nicht übermittelt;
+der bestätigte fehlende Nutzen wird trotzdem als Befund übernommen.
+
+Der nächste Pilot muss sich in Funkpfad, Standort oder Uplink tatsächlich ändern:
+ein AP näher an den Garagen mit nachgewiesen brauchbarem Uplink. Ein LAN-Uplink
+ist eine mögliche Ausführung, sofern ein Kabelweg verfügbar ist; dieser ist
+noch nicht belegt. Eine weitere WLAN-Strecke braucht eine gemessene brauchbare
+Verbindung und darf nicht allein wegen der kurzen Luftlinie als geeignet gelten.
+Den bestehenden Repeater-Uplink nur zur Einordnung des bisherigen Pfads auslesen;
+daraus wird keine Wiederholung des bereits erfolglosen Fenstertests abgeleitet.
+
+Ein S3 am gleichen Fenster ist ebenfalls keine bereits belegte Lösung.
+Sein Vergleich wäre ein gesonderter Hardware-/Antennenversuch mit offenem Ausgang.
+Bei unzureichendem Uplink wird der NAT-Pilot an diesem Ort verworfen.
 
 Mit dem vorhandenen Bestand ist ein freies USB-S3-Board der bewegliche
 **WLAN-only-NAT-Pilot**. Keine BLE-, Voice- oder CSI-Aufgabe gleichzeitig.
