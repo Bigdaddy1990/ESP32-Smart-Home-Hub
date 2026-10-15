@@ -6,6 +6,9 @@ Der Zähler-Hub bleibt an seiner bisherigen Aufgabe und Adresse. Die Änderung
 entfernt nur die alten 1100-ms-Scanvorgaben zugunsten der versionsabhängigen
 ESPHome-Standards, erhält den passiven Betrieb und ergänzt RSSI/BSSID.
 Der manuelle Scanbutton erhält den Dauerscan. Kein WLAN-AP/NAT auf dem Zähler-Hub.
+Im verschlüsselten Migrationseinstieg wird zusätzlich das funktionslose Captive
+Portal entfernt und HTTP-OTA deaktiviert: Das Portal lädt sonst Web-OTA nach,
+obwohl dessen expliziter Eintrag entfernt wurde. Die Passwortbrücke bleibt intakt.
 
 Grundlage: vollständig gelesene Repository-Konfigurationen auf main
 `5d75e81d0c8e58f80a13bf8205feced67e8b55a7`, README und OTA-Anleitung.
@@ -55,7 +58,7 @@ nicht abgerufen. Alle nachfolgenden Hardwarewirkungen sind **unbestätigt**.
 | Proxy .47, Schlafzimmer DG | Netzplan: WROOM/BLE-Proxy, früher -39 dBm | Behalten; kein belegter Austauschbedarf |
 | Shelly Plus 1 .72, Garage 2 | Wiederholte WLAN-Abbrüche vom Nutzer berichtet; 09.10. -85 dBm, drei laufende Scripts dokumentiert | Eigentlichen WLAN-Pfad verbessern; Torimpuls/Auto-off/Taster lokal erhalten |
 | Zwei Tuya-Kontakte | Netzplan identifiziert Verpackungen C30-ZY_D02_1PCS als WiFi Version; physische HA-ID-Zuordnung nicht bestätigt | Kontakt A Garage 1, B Garage 2 als Ziel; einzeln zuordnen, WLAN/App/HA-Ereignisweg testen |
-| Vorhandene Gen2/Gen3-Shellys | Mehrere native Extender-Kandidaten; blauer Mini ggf. bereits LichtWZ | Kein als belegt belegtes Gerät als freie Reserve umwidmen; nur passendes freies/versorgtes Gerät verwenden |
+| Vorhandene Gen2/Gen3-Shellys | Mehrere native Extender-Kandidaten; blauer Mini ggf. bereits LichtWZ | Kein bereits belegtes Gerät als freie Reserve umwidmen; nur passendes freies/versorgtes Gerät verwenden |
 | Repeater 6000 | Wohnzimmer EG dokumentiert; damaliger Diagnoseabruf HTTP 500, Uplinkmodus ungeklärt | Heutigen AP/BSSID-/Uplinkpfad feststellen; HTTP 500 beweist keinen Funk-/Hardwaredefekt |
 
 Die aktuelle Repository-YAML hat DG-Impulszählung, während ältere Nutzerentscheidungen
@@ -153,6 +156,14 @@ Ubuntu: `python3.14 -m esphome config "espsmarthomehub,yaml"`.
 Danach mit `compile` und der gleichen Datei; für den verschlüsselten Einstieg
 entsprechend `espsmarthomehub-encrypted-ota.yaml`. Reale Secrets bleiben lokal.
 
+Das Captive Portal ist ohne Fallback-AP bereits im Ausgangsstand unerreichbar;
+es ist kein nachgewiesener Recovery-Weg. Nur im verschlüsselten Einstieg wird es
+entfernt, damit seine Auto-Load-Abhängigkeit HTTP-OTA nicht erneut aktiviert.
+Die Web-Statusoberfläche bleibt dort erhalten, mit explizitem \`ota: false\`.
+Im aufgelösten verschlüsselten Build darf kein \`platform: web_server\` unter
+\`ota\` und kein \`captive_portal\` mehr enthalten sein; der \`hub_ota\`-Eintrag
+muss weiterhin Verschlüsselung mit dem unveränderten API-Key verwenden.
+
 Die OTA-Migrationsanleitung bleibt gültig: Passwortbrücke zuerst, verschlüsselter
 Einstieg erst nach bestätigtem erfolgreichen Übergang. Kein Firmwareupload in
 dieser Untersuchung. Firmwaretests belegen weder Funkwirkung noch Recovery.
@@ -169,6 +180,8 @@ gesicherter Akkumulation bei Stromausfall möglich; kein Nullverlustversprechen.
 - [ESPHome Tracker](https://esphome.io/components/esp32_ble_tracker/)
 - [Tracker-Validierung 2026.9.1](https://github.com/esphome/esphome/blob/2026.9.1/esphome/components/esp32_ble_tracker/__init__.py): Koexistenz, 600-ms-Warnung und bedingte Standards
 - [Scan-Action 2026.9.1](https://github.com/esphome/esphome/blob/2026.9.1/esphome/components/esp32_ble_tracker/automation.h): set_scan_continuous
+- [Captive-Portal Auto-Load](https://github.com/esphome/esphome/blob/2026.9.1/esphome/components/captive_portal/__init__.py)
+- [Webserver OTA-Schalter](https://github.com/esphome/esphome/blob/2026.9.1/esphome/components/web_server/__init__.py)
 - [Bluetooth-Proxy](https://esphome.io/components/bluetooth_proxy/)
 - [S3-Proxy-Beispiel](https://github.com/esphome/bluetooth-proxies/blob/main/m5stack/m5stack-atom-s3.yaml)
 - [WLAN](https://esphome.io/components/wifi/)

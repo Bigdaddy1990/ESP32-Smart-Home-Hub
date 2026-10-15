@@ -11,3 +11,11 @@ ota:
     password: !remove
     encryption:
   - id: !remove hub_web_ota
+
+# captive_portal auto-loads ota.web_server even after the explicit platform
+# was removed above. No fallback AP exists in the included hub configuration.
+captive_portal: !remove
+
+# Keep the status web UI, but never accept firmware through plaintext HTTP.
+web_server:
+  ota: false
