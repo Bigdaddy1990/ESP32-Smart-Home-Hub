@@ -40,9 +40,9 @@ wifi:
     dns1: 192.168.2.1
 
 esp32_ble_tracker:
+  # Use ESPHome's coexistence-aware defaults (320ms interval on 2026.9.1).
+  # Explicit 1100ms windows can starve this hub's Wi-Fi; see docs/garage-radio.md.
   scan_parameters:
-    interval: 1100ms
-    window: 1100ms
     active: false
 
 bluetooth_proxy:
@@ -157,6 +157,13 @@ globals:
 # SENSOREN
 # ═══════════════════════════════════════════════════════
 sensor:
+
+  # Read-only diagnostics; no extra Wi-Fi scans or energy-counter changes.
+  - platform: wifi_signal
+    name: "ESP32 WLAN RSSI"
+    id: esp32_wifi_rssi
+    entity_category: diagnostic
+    update_interval: 60s
 
   # ───────────────────────────────────────────────────────
   # DG PULSE METER (intern)
@@ -652,6 +659,10 @@ text_sensor:
     icon: "mdi:identifier"
 
   - platform: wifi_info
+    bssid:
+      name: "ESP32 WLAN BSSID"
+      id: esp32_wifi_bssid
+      entity_category: diagnostic
     ip_address:
       name: "ESP32 IP Adresse"
       id: esp32_ip
@@ -744,10 +755,8 @@ button:
             - "id(solar_gesamt_leistung).state"
       - logger.log: "=== SML DIAGNOSE ENDE ==="
  
-  # FIX: Korrekte ESPHome-Action statt direktem C++-Pointer-Aufruf.
-  # esp32_ble_tracker.start_scan löst einen einmaligen Scan-Zyklus aus.
-  # continuous: false → Scan endet nach einem Durchlauf (passiver Modus
-  # läuft danach gemäß scan_parameters weiter).
+  # Keep the passive proxy scanning continuously after a manual start.
+  # continuous: false would disable the next scan after this cycle ends.
   - platform: template
     name: "BT Scan starten"
     id: bt_scan_button
@@ -755,4 +764,4 @@ button:
     on_press:
       - logger.log: "Manueller Bluetooth-Scan gestartet"
       - esp32_ble_tracker.start_scan:
-          continuous: false
+          continuous: true
